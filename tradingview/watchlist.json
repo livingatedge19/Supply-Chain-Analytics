@@ -1,8 +1,20 @@
 [
-  {
-    "symbol": "BEL",
-    "token": 95673,
-    "name": "Bharat Electronics Ltd",
-    "exchange": "NSE"
-  }
+  { "symbol": "KRN",        "token": 0, "name": "Krn Heat Exchanger and Refrigeration Ltd" },
+  { "symbol": "DATAPATTNS", "token": 0, "name": "Data Patterns (India) Ltd" },
+  { "symbol": "FIVESTAR",   "token": 0, "name": "Five-Star Business Finance Ltd" },
+  { "symbol": "DEEDEV",     "token": 0, "name": "DEE Development Engineers Ltd" },
+  { "symbol": "LUXIND",     "token": 0, "name": "Lux Industries Ltd" },
+  { "symbol": "OMNI",       "token": 0, "name": "Omnitech Engineering Ltd" },
+  { "symbol": "ABCAPITAL",  "token": 0, "name": "Aditya Birla Capital Ltd" },
+  { "symbol": "GVPIL",      "token": 0, "name": "GE Power India Ltd" },
+  { "symbol": "KSHINTL",    "token": 0, "name": "KSH International Ltd" },
+  { "symbol": "FINCABLES",  "token": 0, "name": "Finolex Cables Ltd" },
+  { "symbol": "CGPOWER",    "token": 0, "name": "CG Power & Industrial Solutions Ltd" },
+  { "symbol": "JAINREC",    "token": 0, "name": "Jain Resource Recycling Ltd" },
+  { "symbol": "ADANIPORTS", "token": 0, "name": "Adani Ports & Special Economic Zone Ltd" },
+  { "symbol": "TBOTEK",     "token": 0, "name": "TBO Tek Ltd" },
+  { "symbol": "RAINBOW",    "token": 0, "name": "Rainbow Childrens Medicare Ltd" },
+  { "symbol": "GLAND",      "token": 0, "name": "Gland Pharma Ltd" },
+  { "symbol": "PCBL",       "token": 0, "name": "PCBL Chemical Ltd" },
+  { "symbol": "BLS",        "token": 0, "name": "BLS International Services Ltd" }
 ]
