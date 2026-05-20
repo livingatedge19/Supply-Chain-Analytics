@@ -11,11 +11,12 @@ require('dotenv').config({ path: path.join(__dirname, '.env') });
 
 // ─── Paths ───────────────────────────────────────────────────────────────────
 
-const TRADES_CSV  = path.join(__dirname, 'trades.csv');
-const SAFETY_LOG  = path.join(__dirname, 'safety-check-log.json');
-const ENV_FILE    = path.join(__dirname, '.env');
-const ENV_EXAMPLE = path.join(__dirname, '.env.example');
-const RULES_FILE  = path.join(__dirname, 'rules.json');
+const TRADES_CSV     = path.join(__dirname, 'trades.csv');
+const SAFETY_LOG     = path.join(__dirname, 'safety-check-log.json');
+const ENV_FILE       = path.join(__dirname, '.env');
+const ENV_EXAMPLE    = path.join(__dirname, '.env.example');
+const RULES_FILE     = path.join(__dirname, 'rules.json');
+const WATCHLIST_FILE = path.join(__dirname, 'watchlist.json');
 
 // ─── Config ──────────────────────────────────────────────────────────────────
 
@@ -453,6 +454,106 @@ function printTaxSummary() {
   console.log(`\n  📄  Full log:      ${TRADES_CSV}\n`);
 }
 
+// ─── Watchlist loader ─────────────────────────────────────────────────────────
+
+function loadWatchlist() {
+  if (!fs.existsSync(WATCHLIST_FILE)) return null;
+  try {
+    const list = JSON.parse(fs.readFileSync(WATCHLIST_FILE, 'utf8'));
+    if (!Array.isArray(list) || list.length === 0) return null;
+    return list;
+  } catch { return null; }
+}
+
+// ─── Per-symbol pipeline ──────────────────────────────────────────────────────
+
+async function runSymbol({ symbol, token, exchangeName, rules }) {
+  console.log(`\n${'─'.repeat(44)}`);
+  console.log(`📊  ${symbol}`);
+  console.log('─'.repeat(44));
+
+  // Fetch candles
+  const source = IS_KITE ? 'Kite' : 'Binance';
+  process.stdout.write(`📡  Fetching ${TIMEFRAME} data from ${source}... `);
+  let candles;
+  try {
+    candles = IS_KITE
+      ? await fetchKiteCandles(String(token), TIMEFRAME)
+      : await fetchBinanceCandles(symbol, TIMEFRAME);
+  } catch (e) {
+    console.log(`\n❌  ${e.message}`);
+    return;
+  }
+
+  if (candles.length < 10) {
+    console.log(`\n❌  Only ${candles.length} candles — skipping.`);
+    return;
+  }
+  console.log(`${candles.length} candles`);
+
+  // Indicators
+  const indicators = calcIndicators(candles);
+  const { price, ema8, vwap: vwapVal, rsi3 } = indicators;
+
+  console.log(`  Price: ${CURRENCY}${price.toFixed(2)}  EMA8: ${CURRENCY}${ema8?.toFixed(2) ?? 'N/A'}  VWAP: ${CURRENCY}${vwapVal?.toFixed(2) ?? 'N/A'}  RSI3: ${rsi3?.toFixed(2) ?? 'N/A'}`);
+
+  // Bias + safety check
+  const bias  = getBias(rules, indicators);
+  const check = runSafetyCheck(rules, indicators, bias);
+
+  console.log(`  Bias: ${bias.toUpperCase()}`);
+  for (const r of check.results) {
+    const icon = r.pass ? '✅' : '❌';
+    const got  = r.actual != null ? ` (${r.actual.toFixed(2)})` : '';
+    console.log(`  ${icon}  ${r.condition}${got}`);
+  }
+
+  logSafetyCheck({ exchange: EXCHANGE, symbol, timeframe: TIMEFRAME, indicators, bias, check });
+
+  if (!check.allPass) {
+    const failed = check.results.filter(r => !r.pass).map(r => r.condition);
+    console.log(`  🚫  No trade — failed: ${failed.join(', ')}`);
+    logTrade({
+      exchange: exchangeName, symbol,
+      side: bias === 'bullish' ? 'BUY' : 'SELL',
+      quantity: 0, price, orderId: null, mode: 'blocked',
+      notes: `Failed: ${failed.join('; ')}`,
+    });
+    return;
+  }
+
+  // Position sizing
+  const riskPct  = rules.risk?.position_size_pct ?? 0.01;
+  const tradeAmt = Math.min(MAX_TRADE_AMT, PORTFOLIO_VALUE * riskPct);
+  const quantity = IS_KITE
+    ? Math.max(1, Math.floor(tradeAmt / price))
+    : parseFloat((tradeAmt / price).toFixed(6));
+  const side = bias === 'bullish' ? 'BUY' : bias === 'bearish' ? 'SELL' : null;
+
+  if (!side) { console.log('  🚫  Bias neutral — no trade.'); return; }
+
+  const actualAmt = (quantity * price).toFixed(2);
+  console.log(`\n  💡  ${side} ${quantity} shares @ ${CURRENCY}${price.toFixed(2)} (~${CURRENCY}${actualAmt})`);
+
+  if (PAPER_TRADING) {
+    const orderId = `PAPER-${Date.now()}`;
+    console.log(`  📝  PAPER TRADE logged.`);
+    logTrade({ exchange: exchangeName, symbol, side, quantity, price, orderId, mode: 'paper', notes: '' });
+  } else {
+    console.log(`  🔴  Placing live order...`);
+    try {
+      const orderId = IS_KITE
+        ? await placeKiteOrder({ symbol, side, quantity })
+        : await placeBitgetOrder({ symbol, side, size: quantity });
+      console.log(`  ✅  Order placed — ID: ${orderId}`);
+      logTrade({ exchange: exchangeName, symbol, side, quantity, price, orderId, mode: 'live', notes: '' });
+    } catch (e) {
+      console.error(`  ❌  Order failed: ${e.message}`);
+      logTrade({ exchange: exchangeName, symbol, side, quantity, price, orderId: null, mode: 'error', notes: e.message });
+    }
+  }
+}
+
 // ─── Main ─────────────────────────────────────────────────────────────────────
 
 async function main() {
@@ -465,125 +566,60 @@ async function main() {
   const exchangeName  = IS_KITE ? 'Zerodha' : 'BitGet';
 
   console.log('\n🤖  Claude + TradingView MCP — Trading Bot');
-  console.log('──────────────────────────────────────────');
+  console.log('══════════════════════════════════════════');
   console.log(`  Exchange:      ${exchangeLabel}`);
-  console.log(`  Symbol:        ${SYMBOL}${IS_KITE ? ` (token: ${KITE_INSTRUMENT || 'NOT SET'})` : ''}`);
   console.log(`  Timeframe:     ${TIMEFRAME}`);
   console.log(`  Mode:          ${PAPER_TRADING ? '📝  PAPER (no real orders)' : '🔴  LIVE'}`);
   if (IS_KITE) console.log(`  Product:       ${TRADE_PRODUCT} on ${NSE_EXCHANGE}`);
   console.log(`  Portfolio:     ${CURRENCY}${PORTFOLIO_VALUE.toLocaleString('en-IN')}`);
   console.log(`  Max trade:     ${CURRENCY}${MAX_TRADE_AMT.toLocaleString('en-IN')}`);
-  console.log(`  Daily limit:   ${MAX_DAILY_TRADES} trades\n`);
+  console.log(`  Daily limit:   ${MAX_DAILY_TRADES} trades`);
 
-  // NSE market hours check (warn but don't block paper trading)
+  // NSE market hours check
   if (IS_KITE) {
     if (!isNSEOpen()) {
-      console.log(`⏰  NSE is currently closed (${istTimeString()}). Market: Mon–Fri 09:15–15:30 IST.`);
+      console.log(`\n⏰  NSE is currently closed (${istTimeString()}). Market: Mon–Fri 09:15–15:30 IST.`);
       if (!PAPER_TRADING) {
-        console.log('    Live orders will be rejected outside market hours. Exiting.');
+        console.log('    Live orders rejected outside market hours. Exiting.');
         return;
       }
-      console.log('    Running in paper mode — continuing.\n');
+      console.log('    Paper mode — continuing anyway.\n');
     }
   }
 
   // Daily limit guard
   const todayCount = countTodayTrades();
   if (todayCount >= MAX_DAILY_TRADES) {
-    console.log(`🛑  Daily trade limit reached (${todayCount}/${MAX_DAILY_TRADES}). Exiting.`);
+    console.log(`\n🛑  Daily trade limit reached (${todayCount}/${MAX_DAILY_TRADES}). Exiting.`);
     return;
   }
+  console.log(`  Trades today:  ${todayCount}/${MAX_DAILY_TRADES}`);
 
-  // Fetch candles
-  const source = IS_KITE ? 'Kite Connect' : 'Binance';
-  console.log(`📡  Fetching ${SYMBOL} ${TIMEFRAME} data from ${source}...`);
-  let candles;
-  try {
-    candles = IS_KITE
-      ? await fetchKiteCandles(KITE_INSTRUMENT, TIMEFRAME)
-      : await fetchBinanceCandles(SYMBOL, TIMEFRAME);
-  } catch (e) {
-    console.error('❌  Market data fetch failed:', e.message);
-    process.exit(1);
-  }
-
-  if (candles.length < 10) {
-    console.error(`❌  Not enough candles (${candles.length}). Market may be closed or symbol/token may be wrong.`);
-    process.exit(1);
-  }
-  console.log(`    Got ${candles.length} candles. Latest close: ${CURRENCY}${candles[candles.length - 1].close.toFixed(2)}`);
-
-  // Indicators
-  const indicators          = calcIndicators(candles);
-  const { price, ema8, vwap: vwapVal, rsi3 } = indicators;
-
-  console.log('\n📈  Indicators');
-  console.log('────────────────────────────────────');
-  console.log(`  Price:         ${CURRENCY}${price.toFixed(2)}`);
-  console.log(`  EMA(8):        ${CURRENCY}${ema8?.toFixed(2) ?? 'N/A'}`);
-  console.log(`  VWAP:          ${CURRENCY}${vwapVal?.toFixed(2) ?? 'N/A'}`);
-  console.log(`  RSI(3):        ${rsi3?.toFixed(2) ?? 'N/A'}`);
-
-  // Bias + safety check
+  // Load rules
   const rules = loadRules();
-  const bias  = getBias(rules, indicators);
-  console.log(`  Bias:          ${bias.toUpperCase()}`);
 
-  const check = runSafetyCheck(rules, indicators, bias);
+  // Load watchlist (falls back to single SYMBOL from .env)
+  const watchlist = loadWatchlist();
 
-  console.log('\n🔍  Safety Check');
-  console.log('────────────────────────────────────');
-  for (const r of check.results) {
-    const icon = r.pass ? '✅' : '❌';
-    const got  = r.actual != null ? ` (got ${typeof r.actual === 'number' ? r.actual.toFixed(2) : r.actual})` : '';
-    console.log(`  ${icon}  ${r.condition}${got}`);
-  }
-
-  logSafetyCheck({ exchange: EXCHANGE, symbol: SYMBOL, timeframe: TIMEFRAME, indicators, bias, check });
-
-  if (!check.allPass) {
-    const failed = check.results.filter(r => !r.pass).map(r => r.condition);
-    console.log(`\n🚫  No trade — failed: ${failed.join(', ')}`);
-    logTrade({
-      exchange: exchangeName, symbol: SYMBOL,
-      side: bias === 'bullish' ? 'BUY' : 'SELL',
-      quantity: 0, price, orderId: null, mode: 'blocked',
-      notes: `Failed: ${failed.join('; ')}`,
-    });
-    return;
-  }
-
-  // Position sizing — NSE requires whole shares; crypto allows fractions
-  const riskPct  = rules.risk?.position_size_pct ?? 0.01;
-  const tradeAmt = Math.min(MAX_TRADE_AMT, PORTFOLIO_VALUE * riskPct);
-  const quantity = IS_KITE
-    ? Math.max(1, Math.floor(tradeAmt / price))
-    : parseFloat((tradeAmt / price).toFixed(6));
-  const side = bias === 'bullish' ? 'BUY' : bias === 'bearish' ? 'SELL' : null;
-
-  if (!side) { console.log('\n🚫  Bias neutral — no trade.'); return; }
-
-  const actualAmt = (quantity * price).toFixed(2);
-  console.log(`\n💡  Decision: ${side} ${quantity} ${SYMBOL} @ ${CURRENCY}${price.toFixed(2)} (~${CURRENCY}${actualAmt})`);
-
-  if (PAPER_TRADING) {
-    const orderId = `PAPER-${Date.now()}`;
-    console.log(`\n📝  PAPER TRADE — logged (no real order placed).`);
-    logTrade({ exchange: exchangeName, symbol: SYMBOL, side, quantity, price, orderId, mode: 'paper', notes: '' });
-    console.log(`✅  Saved to ${TRADES_CSV}`);
-  } else {
-    console.log(`\n🔴  Placing live order on ${exchangeName}...`);
-    try {
-      const orderId = IS_KITE
-        ? await placeKiteOrder({ symbol: SYMBOL, side, quantity })
-        : await placeBitgetOrder({ symbol: SYMBOL, side, size: quantity });
-      console.log(`✅  Order placed — ID: ${orderId}`);
-      logTrade({ exchange: exchangeName, symbol: SYMBOL, side, quantity, price, orderId, mode: 'live', notes: '' });
-    } catch (e) {
-      console.error('❌  Order failed:', e.message);
-      logTrade({ exchange: exchangeName, symbol: SYMBOL, side, quantity, price, orderId: null, mode: 'error', notes: e.message });
+  if (watchlist) {
+    console.log(`\n📋  Watchlist: ${watchlist.map(s => s.symbol).join(', ')} (${watchlist.length} stocks)`);
+    for (const stock of watchlist) {
+      const remaining = MAX_DAILY_TRADES - countTodayTrades();
+      if (remaining <= 0) {
+        console.log('\n🛑  Daily trade limit reached mid-scan. Stopping.');
+        break;
+      }
+      await runSymbol({ symbol: stock.symbol, token: stock.token, exchangeName, rules });
     }
+  } else {
+    // Single symbol fallback
+    const token = IS_KITE ? KITE_INSTRUMENT : null;
+    await runSymbol({ symbol: SYMBOL, token, exchangeName, rules });
   }
+
+  console.log(`\n${'═'.repeat(44)}`);
+  console.log(`✅  Scan complete. Log: ${TRADES_CSV}`);
+  console.log(`    Run "node bot.js --tax-summary" for totals.\n`);
 }
 
 main().catch(err => { console.error('Fatal:', err.message); process.exit(1); });
