@@ -9,6 +9,8 @@ const querystring = require('querystring');
 
 require('dotenv').config({ path: path.join(__dirname, '.env') });
 
+const { analyzeSMC, BULLISH: SMC_BULLISH, BEARISH: SMC_BEARISH } = require('./smc');
+
 // ─── Paths ───────────────────────────────────────────────────────────────────
 
 const TRADES_CSV     = path.join(__dirname, 'trades.csv');
@@ -497,6 +499,16 @@ async function runSymbol({ symbol, token, exchangeName, rules }) {
 
   console.log(`  Price: ${CURRENCY}${price.toFixed(2)}  EMA8: ${CURRENCY}${ema8?.toFixed(2) ?? 'N/A'}  VWAP: ${CURRENCY}${vwapVal?.toFixed(2) ?? 'N/A'}  RSI3: ${rsi3?.toFixed(2) ?? 'N/A'}`);
 
+  // SMC structural analysis
+  const smc = analyzeSMC(candles);
+  const smcParts = [`SMC: ${smc.biasLabel}`];
+  if (smc.recentCHoCH) smcParts.push(`${smc.recentCHoCH.direction} CHoCH`);
+  else if (smc.recentBOS) smcParts.push(`${smc.recentBOS.direction} BOS`);
+  if (smc.inOrderBlock) smcParts.push(`in ${smc.inOrderBlock.bias === SMC_BULLISH ? 'Bull' : 'Bear'} OB`);
+  if (smc.inFVG)        smcParts.push(`in ${smc.inFVG.bias === SMC_BULLISH ? 'Bull' : 'Bear'} FVG`);
+  smcParts.push(`OBs:${smc.activeOrderBlocks.length} FVGs:${smc.activeFVGs.length}`);
+  console.log(`  ${smcParts.join('  |  ')}`);
+
   // Bias + safety check
   const bias  = getBias(rules, indicators);
   const check = runSafetyCheck(rules, indicators, bias);
@@ -522,6 +534,23 @@ async function runSymbol({ symbol, token, exchangeName, rules }) {
     return;
   }
 
+  // SMC structural bias filter — skip if SMC contradicts the VWAP/EMA bias
+  if (smc.bias !== 0) {
+    const smcAgrees =
+      (bias === 'bullish' && smc.bias === SMC_BULLISH) ||
+      (bias === 'bearish' && smc.bias === SMC_BEARISH);
+    if (!smcAgrees) {
+      console.log(`  🚫  No trade — VWAP/EMA bias ${bias.toUpperCase()} conflicts with SMC ${smc.biasLabel}`);
+      logTrade({
+        exchange: exchangeName, symbol,
+        side: bias === 'bullish' ? 'BUY' : 'SELL',
+        quantity: 0, price, orderId: null, mode: 'blocked',
+        notes: `SMC conflict: strategy=${bias} smc=${smc.biasLabel}`,
+      });
+      return;
+    }
+  }
+
   // Position sizing
   const riskPct  = rules.risk?.position_size_pct ?? 0.01;
   const tradeAmt = Math.min(MAX_TRADE_AMT, PORTFOLIO_VALUE * riskPct);
@@ -536,9 +565,10 @@ async function runSymbol({ symbol, token, exchangeName, rules }) {
   console.log(`\n  💡  ${side} ${quantity} shares @ ${CURRENCY}${price.toFixed(2)} (~${CURRENCY}${actualAmt})`);
 
   if (PAPER_TRADING) {
-    const orderId = `PAPER-${Date.now()}`;
+    const orderId  = `PAPER-${Date.now()}`;
+    const smcNotes = `smc=${smc.biasLabel}${smc.inOrderBlock ? ' in-OB' : ''}${smc.inFVG ? ' in-FVG' : ''}`;
     console.log(`  📝  PAPER TRADE logged.`);
-    logTrade({ exchange: exchangeName, symbol, side, quantity, price, orderId, mode: 'paper', notes: '' });
+    logTrade({ exchange: exchangeName, symbol, side, quantity, price, orderId, mode: 'paper', notes: smcNotes });
   } else {
     console.log(`  🔴  Placing live order...`);
     try {
