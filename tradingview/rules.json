@@ -1,0 +1,39 @@
+{
+  "strategy": "VWAP + RSI(3) + EMA(8) Scalping",
+  "description": "All three signals must align before a trade fires. Price must be on the correct side of both VWAP and EMA(8); RSI(3) must confirm an oversold/overbought reversal entry.",
+  "timeframe": "1m",
+
+  "bias": {
+    "bullish": [
+      "price > vwap",
+      "price > ema8"
+    ],
+    "bearish": [
+      "price < vwap",
+      "price < ema8"
+    ]
+  },
+
+  "entry_rules": {
+    "bullish": [
+      "price > vwap",
+      "price > ema8",
+      "rsi3 < 30"
+    ],
+    "bearish": [
+      "price < vwap",
+      "price < ema8",
+      "rsi3 > 70"
+    ]
+  },
+
+  "risk": {
+    "position_size_pct": 0.01,
+    "max_vwap_deviation_pct": 1.5,
+    "stop_loss_pct": 0.3,
+    "take_profit": "vwap or ema8 touch",
+    "exit_condition": "rsi3 crosses 50"
+  },
+
+  "notes": "Paper trade first — validate on your specific asset before going live. Designed for 1-5 minute timeframes only."
+}

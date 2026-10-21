@@ -1,0 +1,4 @@
+.env
+node_modules/
+safety-check-log.json
+*.log
